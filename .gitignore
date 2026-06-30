@@ -1,0 +1,52 @@
+# ─── Secrets & configuration (never commit) ──────────────────────────────────
+*.env
+.env
+.env.*
+appsettings.*.json
+!appsettings.Example.json
+secrets.json
+*.pfx
+*.key
+*.pem
+*.p12
+keys/
+**/DataProtection-Keys/
+
+# ─── .NET build output ───────────────────────────────────────────────────────
+bin/
+obj/
+out/
+*.user
+*.suo
+*.userprefs
+project.lock.json
+artifacts/
+
+# ─── Local databases ─────────────────────────────────────────────────────────
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# ─── Node / frontend (if ever added) ─────────────────────────────────────────
+node_modules/
+.next/
+dist/
+*.log
+npm-debug.log*
+
+# ─── IDE / editor ────────────────────────────────────────────────────────────
+.vs/
+.vscode/
+.idea/
+*.swp
+*.DS_Store
+Thumbs.db
+
+# ─── Test & coverage output ──────────────────────────────────────────────────
+TestResults/
+*.trx
+coverage/
+*.coverage
+*.coveragexml
