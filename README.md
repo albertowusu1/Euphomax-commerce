@@ -118,6 +118,15 @@ These are the parts worth opening the code for:
 - **Multi-job CI with a zero-warning policy.** Backend, desktop, and frontend build on every change; a single compiler warning fails the build (`/warnaserror`). An OpenAPI contract is generated and **diffed against a committed baseline** so a breaking API change blocks merge.
   → [`docs/ci-pipeline.yml`](docs/ci-pipeline.yml)
 
+- **Blazor Server back-office UI.** The management console is a Blazor Server application. This sync-health dashboard injects a typed API client, binds live register / rejection / sequence-gap data into MudBlazor tables, and drives acknowledge / resolve actions through a confirmation dialog — never touching the database directly.
+  → [`SyncHealthDashboard.razor`](src/BMS.Backoffice/SyncHealthDashboard.razor)
+
+- **Unit testing with Moq.** Services are tested in isolation with mocked dependencies. Here the sync rejection-log state machine and health classification are driven entirely through `Mock<IUnitOfWork>` setups and `[Theory]` cases, backed by a hand-rolled async `IQueryable` provider so EF Core async operators resolve without a database.
+  → [`SyncServiceRejectionTests.cs`](src/BMS.UnitTests/Tests/SyncServiceRejectionTests.cs)
+
+- **DTO mapping with AutoMapper.** Domain-to-DTO translation is centralized in AutoMapper profiles — including computed members (split-payment detection, balance due) and explicit ignore-lists so a request DTO can never overwrite a server-owned field.
+  → [`SaleMappingProfile.cs`](src/BMS.Services/Mappings/SaleMappingProfile.cs)
+
 ---
 
 ## Screenshots
@@ -134,7 +143,7 @@ These are the parts worth opening the code for:
 
 **This is a curated subset, not the full system.** The production platform is a large multi-project solution. To prove engineering depth without exposing the entire proprietary codebase or sensitive business logic, this repo includes:
 
-- A few **complete, representative files** (entities, validators, an API controller, query/index extensions, an integration test).
+- A few **complete, representative files** (entities, validators, an API controller, query/index extensions, an integration test, a Blazor back-office page, a Moq-based unit test, and an AutoMapper profile).
 - A handful of **focused excerpts** of larger files, clearly marked at the top, where only the illustrative portion is reproduced and the rest is elided with `// … omitted` markers (e.g. the multi-tenancy slice of the `DbContext`, the single-sale path of the sync engine, one query method).
 
 It is therefore **not buildable as-is** — there is no `.sln`, no full dependency graph, and no configuration. It is meant to be *read*. Every excerpt mirrors real production code; nothing here is a toy reimplementation.
@@ -148,3 +157,8 @@ It is therefore **not buildable as-is** — there is no `.sln`, no full dependen
 The source in this repository is published **for evaluation and demonstration purposes only** — to let prospective collaborators and reviewers assess the engineering. It is **not licensed for reuse, redistribution, or production use.** See [`LICENSE`](LICENSE).
 
 © Albert Owusu. All rights reserved.
+
+---
+
+**Built by Albert Owusu** — Software Engineer · Kumasi, Ghana
+[LinkedIn](http://linkedin.com/in/albert-owusu-46401b278) · albertowusu2c@gmail.com

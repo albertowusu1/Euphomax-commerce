@@ -1,0 +1,452 @@
+@* Curated excerpt — part of the Blazor Server back-office console. Not buildable standalone. *@
+@page "/tenant/sync-health"
+@layout BMS.WebPortal.Components.Layout.TenantLayout
+@attribute [Authorize(Policy = "TenantOrBranchAdmin")]
+
+@using BMS.Shared.DTOs.Branch
+@using BMS.Shared.DTOs.Sync
+@using BMS.WebPortal.ApiClients
+@using BMS.WebPortal.Services
+@using Microsoft.AspNetCore.Authorization
+@using BMS.Shared.Exceptions
+@rendermode RenderMode.InteractiveServer
+
+@inject ISyncHealthApiClient SyncHealthApi
+@inject IBranchApiClient BranchApi
+@inject ISnackbar Snackbar
+@inject IDialogService DialogService
+@inject BMS.WebPortal.Services.IBreadcrumbService BreadcrumbService
+@inject TenantLocalizationContext Locale
+
+<PageTitle>Sync Health - Euphomax Commerce</PageTitle>
+
+<MudContainer MaxWidth="MaxWidth.ExtraLarge" Class="mt-4 px-4 px-md-8">
+
+    <!-- Header -->
+    <div class="d-flex justify-space-between align-center mb-4 flex-wrap gap-2">
+        <div>
+            <MudText Typo="Typo.h4">Sync Health Dashboard</MudText>
+            <MudText Typo="Typo.body2" Color="Color.Secondary">
+                Monitor register sync status, quarantined sales, and sequence gap alerts
+            </MudText>
+        </div>
+        <MudButton Variant="Variant.Outlined"
+                   Color="Color.Primary"
+                   StartIcon="@Icons.Material.Filled.Refresh"
+                   OnClick="RefreshAllAsync"
+                   Disabled="_loading">
+            Refresh
+        </MudButton>
+    </div>
+
+    <!-- Register Health Summary -->
+    <MudText Typo="Typo.h6" Class="mb-2">Register Health</MudText>
+    <MudPaper Elevation="1" Class="mb-6">
+        <MudTable Items="_healthData" Loading="_loadingHealth" Dense="true" Hover="true" Striped="true">
+            <HeaderContent>
+                <MudTh>Register</MudTh>
+                <MudTh>Branch</MudTh>
+                <MudTh>Status</MudTh>
+                <MudTh>Last Sync</MudTh>
+                <MudTh Style="text-align:center">Pending Queue</MudTh>
+                <MudTh Style="text-align:center">Rejections</MudTh>
+                <MudTh Style="text-align:center">Open Gaps</MudTh>
+            </HeaderContent>
+            <RowTemplate>
+                <MudTd DataLabel="Register">
+                    <MudText Typo="Typo.body2" Style="font-weight:600">@context.RegisterName</MudText>
+                    <MudText Typo="Typo.caption" Color="Color.Secondary">@context.RegisterCode</MudText>
+                </MudTd>
+                <MudTd DataLabel="Branch">@context.BranchName</MudTd>
+                <MudTd DataLabel="Status">
+                    <MudChip T="string" Color="@GetHealthColor(context.HealthStatus)"
+                             Size="MudBlazor.Size.Small" Variant="Variant.Filled">
+                        @context.HealthStatus
+                    </MudChip>
+                </MudTd>
+                <MudTd DataLabel="Last Sync">
+                    @if (context.LastSuccessfulSyncAt.HasValue)
+                    {
+                        <MudText Typo="Typo.body2">@context.LastSuccessfulSyncAt.Value.ToLocalTime().ToString("g")</MudText>
+                        <MudText Typo="Typo.caption" Color="Color.Secondary">@context.MinutesSinceLastSync min ago</MudText>
+                    }
+                    else
+                    {
+                        <MudText Typo="Typo.caption" Color="Color.Error">Never synced</MudText>
+                    }
+                </MudTd>
+                <MudTd DataLabel="Pending Queue" Style="text-align:center">
+                    <MudText Typo="Typo.body2">@context.LastReportedPendingCount</MudText>
+                </MudTd>
+                <MudTd DataLabel="Rejections" Style="text-align:center">
+                    @if (context.PendingRejections > 0)
+                    {
+                        <MudChip T="string" Color="Color.Error" Size="MudBlazor.Size.Small">@context.PendingRejections pending</MudChip>
+                    }
+                    else
+                    {
+                        <MudText Typo="Typo.body2">@context.TotalRejections total</MudText>
+                    }
+                </MudTd>
+                <MudTd DataLabel="Open Gaps" Style="text-align:center">
+                    @if (context.OpenGapAlerts > 0)
+                    {
+                        <MudChip T="string" Color="Color.Warning" Size="MudBlazor.Size.Small">@context.OpenGapAlerts open</MudChip>
+                    }
+                    else
+                    {
+                        <MudText Typo="Typo.body2" Color="Color.Success">None</MudText>
+                    }
+                </MudTd>
+            </RowTemplate>
+            <NoRecordsContent>
+                <MudText Class="pa-4">No registers found for this tenant.</MudText>
+            </NoRecordsContent>
+        </MudTable>
+    </MudPaper>
+
+    <!-- Rejection Logs -->
+    <div class="d-flex justify-space-between align-center mb-2">
+        <MudText Typo="Typo.h6">Quarantined Sales</MudText>
+        <MudText Typo="Typo.caption" Color="Color.Secondary">
+            Sales permanently rejected by the sync engine — require manager review
+        </MudText>
+    </div>
+
+    <MudPaper Elevation="1" Class="pa-3 mb-2">
+        <MudGrid>
+            <MudItem xs="12" sm="3">
+                <MudSelect T="string" @bind-Value="_rejectionStatusFilter" Label="Status"
+                           Variant="Variant.Outlined" Margin="Margin.Dense" Clearable="true">
+                    <MudSelectItem T="string" Value="@("Pending")">Pending</MudSelectItem>
+                    <MudSelectItem T="string" Value="@("Acknowledged")">Acknowledged</MudSelectItem>
+                    <MudSelectItem T="string" Value="@("WrittenOff")">Written Off</MudSelectItem>
+                </MudSelect>
+            </MudItem>
+            <MudItem xs="12" sm="3">
+                <MudDatePicker @bind-Date="_rejectionFrom" Label="From" Variant="Variant.Outlined"
+                               Margin="Margin.Dense" />
+            </MudItem>
+            <MudItem xs="12" sm="3">
+                <MudDatePicker @bind-Date="_rejectionTo" Label="To" Variant="Variant.Outlined"
+                               Margin="Margin.Dense" />
+            </MudItem>
+            <MudItem xs="12" sm="3" Class="d-flex align-center">
+                <MudButton Variant="Variant.Filled" Color="Color.Primary" OnClick="ApplyRejectionFilter">
+                    Filter
+                </MudButton>
+            </MudItem>
+        </MudGrid>
+    </MudPaper>
+
+    <MudPaper Elevation="1" Class="mb-6">
+        <MudTable Items="_rejectionLogs" Loading="_loadingRejections" Dense="true" Hover="true">
+            <HeaderContent>
+                <MudTh>Receipt #</MudTh>
+                <MudTh>Reason</MudTh>
+                <MudTh>Register</MudTh>
+                <MudTh>Branch</MudTh>
+                <MudTh>Rejected At</MudTh>
+                <MudTh>Amount</MudTh>
+                <MudTh>Status</MudTh>
+                <MudTh>Actions</MudTh>
+            </HeaderContent>
+            <RowTemplate>
+                <MudTd DataLabel="Receipt #">
+                    <MudText Typo="Typo.body2" Style="font-family:monospace">@context.ReceiptNumber</MudText>
+                </MudTd>
+                <MudTd DataLabel="Reason">
+                    <MudChip T="string" Color="@GetRejectionReasonColor(context.RejectionReason)"
+                             Size="MudBlazor.Size.Small" Variant="Variant.Outlined">
+                        @context.RejectionReason
+                    </MudChip>
+                </MudTd>
+                <MudTd DataLabel="Register">@context.RegisterName</MudTd>
+                <MudTd DataLabel="Branch">@context.BranchName</MudTd>
+                <MudTd DataLabel="Rejected At">@context.RejectedAt.ToLocalTime().ToString("g")</MudTd>
+                <MudTd DataLabel="Amount">
+                    @if (context.SaleAmount.HasValue)
+                    {
+                        <span>@Locale.FormatMoney(context.SaleAmount.Value)</span>
+                    }
+                    else
+                    {
+                        <MudText Color="Color.Secondary">—</MudText>
+                    }
+                </MudTd>
+                <MudTd DataLabel="Status">
+                    <MudChip T="string" Color="@GetRejectionStatusColor(context.Status)"
+                             Size="MudBlazor.Size.Small">
+                        @context.Status
+                    </MudChip>
+                </MudTd>
+                <MudTd DataLabel="Actions">
+                    @if (context.Status == "Pending")
+                    {
+                        <MudMenu Icon="@Icons.Material.Filled.MoreVert" Size="MudBlazor.Size.Small" Dense="true">
+                            <MudMenuItem OnClick="@(() => AcknowledgeRejection(context, "Acknowledged"))">
+                                Mark Acknowledged
+                            </MudMenuItem>
+                            <MudMenuItem OnClick="@(() => AcknowledgeRejection(context, "WrittenOff"))">
+                                Write Off
+                            </MudMenuItem>
+                        </MudMenu>
+                    }
+                    <MudTooltip Text="@context.ErrorDetails">
+                        <MudIconButton Icon="@Icons.Material.Filled.Info" Size="MudBlazor.Size.Small" Color="Color.Default" />
+                    </MudTooltip>
+                </MudTd>
+            </RowTemplate>
+            <NoRecordsContent>
+                <MudText Class="pa-4" Color="Color.Success">No quarantined sales matching the filter.</MudText>
+            </NoRecordsContent>
+            <PagerContent>
+                <MudTablePager PageSizeOptions="new int[] { 20, 50, 100 }" />
+            </PagerContent>
+        </MudTable>
+    </MudPaper>
+
+    <!-- Sequence Gap Alerts -->
+    <MudText Typo="Typo.h6" Class="mb-2">Sequence Gap Alerts</MudText>
+    <MudPaper Elevation="1" Class="mb-6">
+        <MudTable Items="_gapAlerts" Loading="_loadingGaps" Dense="true" Hover="true">
+            <HeaderContent>
+                <MudTh>Register</MudTh>
+                <MudTh>Branch</MudTh>
+                <MudTh>Gap Range</MudTh>
+                <MudTh>Size</MudTh>
+                <MudTh>Detected At</MudTh>
+                <MudTh>Status</MudTh>
+                <MudTh>Actions</MudTh>
+            </HeaderContent>
+            <RowTemplate>
+                <MudTd DataLabel="Register">@context.RegisterName</MudTd>
+                <MudTd DataLabel="Branch">@context.BranchName</MudTd>
+                <MudTd DataLabel="Gap Range">
+                    <MudText Style="font-family:monospace" Typo="Typo.body2">
+                        @context.GapStartSequence – @context.GapEndSequence
+                    </MudText>
+                </MudTd>
+                <MudTd DataLabel="Size">@context.GapSize receipt(s)</MudTd>
+                <MudTd DataLabel="Detected At">@context.DetectedAt.ToLocalTime().ToString("g")</MudTd>
+                <MudTd DataLabel="Status">
+                    <MudChip T="string" Color="@GetGapStatusColor(context.Status)" Size="MudBlazor.Size.Small">
+                        @context.Status
+                    </MudChip>
+                </MudTd>
+                <MudTd DataLabel="Actions">
+                    @if (context.Status != "Resolved")
+                    {
+                        <MudButton Size="MudBlazor.Size.Small" Variant="Variant.Text" Color="Color.Primary"
+                                   OnClick="@(() => ResolveGapAlert(context))">
+                            Resolve
+                        </MudButton>
+                    }
+                </MudTd>
+            </RowTemplate>
+            <NoRecordsContent>
+                <MudText Class="pa-4" Color="Color.Success">No open gap alerts.</MudText>
+            </NoRecordsContent>
+        </MudTable>
+    </MudPaper>
+
+</MudContainer>
+
+<!-- Acknowledge / Resolve Dialog -->
+<MudDialog @bind-Visible="_showActionDialog" Options="_dialogOptions">
+    <TitleContent>
+        <MudText Typo="Typo.h6">@_actionDialogTitle</MudText>
+    </TitleContent>
+    <DialogContent>
+        <MudTextField @bind-Value="_actionNotes" Label="Notes (optional)" Variant="Variant.Outlined"
+                      Lines="3" MaxLength="1000" />
+    </DialogContent>
+    <DialogActions>
+        <MudButton OnClick="@(() => _showActionDialog = false)">Cancel</MudButton>
+        <MudButton Color="Color.Primary" Variant="Variant.Filled" OnClick="ConfirmActionAsync">
+            Confirm
+        </MudButton>
+    </DialogActions>
+</MudDialog>
+
+@code {
+    private bool _loading = false;
+    private bool _loadingHealth = false;
+    private bool _loadingRejections = false;
+    private bool _loadingGaps = false;
+
+    private List<RegisterSyncHealthDto> _healthData = new();
+    private List<SyncRejectionLogDto> _rejectionLogs = new();
+    private List<SequenceGapAlertDto> _gapAlerts = new();
+
+    // Rejection log filters
+    private string? _rejectionStatusFilter = "Pending";
+    private DateTime? _rejectionFrom;
+    private DateTime? _rejectionTo;
+
+    // Action dialog state
+    private bool _showActionDialog = false;
+    private string _actionDialogTitle = string.Empty;
+    private string? _actionNotes;
+    private SyncRejectionLogDto? _pendingRejection;
+    private string? _pendingRejectionNewStatus;
+    private SequenceGapAlertDto? _pendingGap;
+
+    private readonly MudBlazor.DialogOptions _dialogOptions = new() { MaxWidth = MaxWidth.Small, FullWidth = true };
+
+    protected override async Task OnInitializedAsync()
+    {
+        BreadcrumbService.SetBreadcrumbs(new List<MudBlazor.BreadcrumbItem>
+        {
+            new("Home", "/tenant"),
+            new("Sync Health", "/tenant/sync-health", disabled: true)
+        });
+        await Locale.EnsureLoadedAsync();
+        await RefreshAllAsync();
+    }
+
+    private async Task RefreshAllAsync()
+    {
+        _loading = true;
+        await Task.WhenAll(LoadHealthAsync(), LoadRejectionLogsAsync(), LoadGapAlertsAsync());
+        _loading = false;
+    }
+
+    private async Task LoadHealthAsync()
+    {
+        _loadingHealth = true;
+        try
+        {
+            _healthData = await SyncHealthApi.GetSyncHealthAsync();
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Failed to load sync health: {ex.Message}", Severity.Error);
+        }
+        finally { _loadingHealth = false; }
+    }
+
+    private async Task LoadRejectionLogsAsync()
+    {
+        _loadingRejections = true;
+        try
+        {
+            var result = await SyncHealthApi.GetRejectionLogsAsync(
+                status: _rejectionStatusFilter,
+                from: _rejectionFrom?.ToUniversalTime(),
+                to: _rejectionTo?.AddDays(1).ToUniversalTime());
+            _rejectionLogs = result.Items;
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Failed to load rejection logs: {ex.Message}", Severity.Error);
+        }
+        finally { _loadingRejections = false; }
+    }
+
+    private async Task LoadGapAlertsAsync()
+    {
+        _loadingGaps = true;
+        try
+        {
+            _gapAlerts = await SyncHealthApi.GetGapAlertsAsync();
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Failed to load gap alerts: {ex.Message}", Severity.Error);
+        }
+        finally { _loadingGaps = false; }
+    }
+
+    private async Task ApplyRejectionFilter()
+    {
+        await LoadRejectionLogsAsync();
+    }
+
+    private void AcknowledgeRejection(SyncRejectionLogDto rejection, string newStatus)
+    {
+        _pendingRejection = rejection;
+        _pendingRejectionNewStatus = newStatus;
+        _pendingGap = null;
+        _actionDialogTitle = newStatus == "WrittenOff"
+            ? $"Write Off: {rejection.ReceiptNumber}"
+            : $"Acknowledge: {rejection.ReceiptNumber}";
+        _actionNotes = null;
+        _showActionDialog = true;
+    }
+
+    private void ResolveGapAlert(SequenceGapAlertDto gap)
+    {
+        _pendingGap = gap;
+        _pendingRejection = null;
+        _actionDialogTitle = $"Resolve Gap: seq {gap.GapStartSequence}–{gap.GapEndSequence} ({gap.RegisterName})";
+        _actionNotes = null;
+        _showActionDialog = true;
+    }
+
+    private async Task ConfirmActionAsync()
+    {
+        _showActionDialog = false;
+        try
+        {
+            if (_pendingRejection != null)
+            {
+                await SyncHealthApi.AcknowledgeRejectionAsync(_pendingRejection.Id,
+                    new AcknowledgeRejectionDto { NewStatus = _pendingRejectionNewStatus!, Notes = _actionNotes });
+                Snackbar.Add($"Rejection {_pendingRejection.ReceiptNumber} marked as {_pendingRejectionNewStatus}.", Severity.Success);
+                await LoadRejectionLogsAsync();
+            }
+            else if (_pendingGap != null)
+            {
+                if (string.IsNullOrWhiteSpace(_actionNotes))
+                {
+                    Snackbar.Add("Resolution notes are required.", Severity.Warning);
+                    return;
+                }
+                await SyncHealthApi.ResolveGapAlertAsync(_pendingGap.Id,
+                    new ResolveGapAlertDto { ResolutionNotes = _actionNotes! });
+                Snackbar.Add("Gap alert resolved.", Severity.Success);
+                await LoadGapAlertsAsync();
+            }
+        }
+        catch (ApiException ex)
+        {
+            Snackbar.Add(ex.Message, Severity.Error);
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Unexpected error: {ex.Message}", Severity.Error);
+        }
+    }
+
+    private static Color GetHealthColor(string status) => status switch
+    {
+        "Healthy" => Color.Success,
+        "Warning" => Color.Warning,
+        "Critical" => Color.Error,
+        _ => Color.Default
+    };
+
+    private static Color GetRejectionReasonColor(string reason) => reason switch
+    {
+        "HashMismatch" => Color.Error,
+        "BranchMismatch" => Color.Warning,
+        _ => Color.Default
+    };
+
+    private static Color GetRejectionStatusColor(string status) => status switch
+    {
+        "Pending" => Color.Warning,
+        "Acknowledged" => Color.Info,
+        "WrittenOff" => Color.Default,
+        _ => Color.Default
+    };
+
+    private static Color GetGapStatusColor(string status) => status switch
+    {
+        "Open" => Color.Error,
+        "Investigating" => Color.Warning,
+        "Resolved" => Color.Success,
+        _ => Color.Default
+    };
+}
