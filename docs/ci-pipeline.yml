@@ -1,0 +1,309 @@
+name: Minimal CI Pipeline
+
+on:
+  push:
+    branches: [ main, 'feature/*', 'fix/*', 'hotfix/*' ]
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+# Cancel in-progress runs on same branch to save runner minutes
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci-backend:
+    name: Build & Test Core (Services)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 8 & 9 SDKs
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            9.0.x
+
+      - name: Cache NuGet Packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: ${{ runner.os }}-nuget-${{ hashFiles('**/*.csproj', '**/packages.lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-nuget-
+
+      - name: Restore Dependencies
+        run: |
+          dotnet restore BMS.WebAPI/BMS.WebAPI.csproj
+          dotnet restore BMS.UnitTests/BMS.UnitTests.csproj
+
+      - name: Build Core/API Projects (Zero Warning Policy)
+        run: |
+          dotnet build BMS.WebAPI/BMS.WebAPI.csproj --no-restore --configuration Release /warnaserror
+          dotnet build BMS.UnitTests/BMS.UnitTests.csproj --no-restore --configuration Release /warnaserror
+
+      - name: Run Services Tests
+        run: dotnet test BMS.UnitTests/BMS.UnitTests.csproj --no-build --configuration Release --logger "trx;LogFileName=services-results.trx"
+
+      - name: Upload Test Results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: core-test-results
+          path: '**/*.trx'
+          retention-days: 14
+
+  ci-windows-register:
+    name: Build & Test WinForms (Register)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 8 & 9 SDKs
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            9.0.x
+
+      - name: Cache NuGet Packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: ${{ runner.os }}-nuget-${{ hashFiles('**/*.csproj', '**/packages.lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-nuget-
+
+      - name: Restore Dependencies
+        run: dotnet restore BusinessManagementSystem.sln
+
+      - name: Build Solution (Zero Warning Policy)
+        run: dotnet build BusinessManagementSystem.sln --no-restore --configuration Release /warnaserror
+
+      - name: Run WinForms Tests
+        run: dotnet test BMS.WinForms.Tests/BMS.WinForms.Tests.csproj --no-build --configuration Release --logger "trx;LogFileName=winforms-results.trx"
+
+      - name: Upload Test Results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: winforms-test-results
+          path: '**/*.trx'
+          retention-days: 14
+
+  ci-frontend:
+    name: Build Next.js Face
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: bms-public-web/package-lock.json
+
+      - name: Install NPM Dependencies
+        working-directory: ./bms-public-web
+        run: npm ci
+
+      - name: Lint Next.js Code
+        working-directory: ./bms-public-web
+        run: npm run lint
+
+      - name: Build Next.js Application
+        working-directory: ./bms-public-web
+        run: npm run build
+
+  # ---------------------------------------------------------------------------
+  # Phase 2.5 — API Contract Validation
+  # Generates the OpenAPI spec and uploads it as an artifact on every PR.
+  # The artifact is consumed downstream by ci-contract-diff, which compares it
+  # against the committed baseline and fails the build on breaking changes.
+  # ---------------------------------------------------------------------------
+  ci-openapi-contract:
+    name: Generate OpenAPI Spec (API Contract)
+    runs-on: ubuntu-latest
+    needs: ci-backend
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 8 & 9 SDKs
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            9.0.x
+
+      - name: Cache NuGet Packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: ${{ runner.os }}-nuget-${{ hashFiles('**/*.csproj', '**/packages.lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-nuget-
+
+      - name: Restore Dependencies
+        run: dotnet restore BMS.WebAPI/BMS.WebAPI.csproj
+
+      - name: Build WebAPI (Release)
+        run: dotnet build BMS.WebAPI/BMS.WebAPI.csproj --no-restore --configuration Release /warnaserror
+
+      - name: Install dotnet tools (Swashbuckle CLI)
+        run: dotnet tool restore
+
+      - name: Generate OpenAPI Spec
+        run: |
+          dotnet swagger tofile \
+            --output openapi-spec.json \
+            BMS.WebAPI/bin/Release/net8.0/BMS.WebAPI.dll \
+            v1
+        env:
+          ASPNETCORE_ENVIRONMENT: Swagger
+          JwtSettings__SecretKey: "integration-test-placeholder-key-minimum-32-characters"
+          JwtSettings__Issuer: "BMS.WebAPI"
+          JwtSettings__Audience: "BMS.Client"
+
+      - name: Upload OpenAPI Spec Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: openapi-spec
+          path: openapi-spec.json
+          retention-days: 14
+
+  # ---------------------------------------------------------------------------
+  # Phase 2.5 — Integration Tests
+  # Runs skeleton integration tests against a real PostgreSQL service container.
+  # Validates: EF migrations, API health endpoints, auth contract, product shape.
+  # ---------------------------------------------------------------------------
+  ci-integration:
+    name: Integration Tests (API + PostgreSQL)
+    runs-on: ubuntu-latest
+    needs: ci-backend
+
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: bms_integration_tests
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 8 & 9 SDKs
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            9.0.x
+
+      - name: Cache NuGet Packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: ${{ runner.os }}-nuget-${{ hashFiles('**/*.csproj', '**/packages.lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-nuget-
+
+      - name: Restore Dependencies
+        run: dotnet restore BMS.IntegrationTests/BMS.IntegrationTests.csproj
+
+      - name: Build Integration Tests (Zero Warning Policy)
+        run: dotnet build BMS.IntegrationTests/BMS.IntegrationTests.csproj --no-restore --configuration Release /warnaserror
+
+      - name: Run Integration Tests
+        env:
+          INTEGRATION_TEST_DB_CONNECTION: "Host=localhost;Port=5432;Database=bms_integration_tests;Username=postgres;Password=postgres"
+          ASPNETCORE_ENVIRONMENT: IntegrationTest
+          JwtSettings__SecretKey: "integration-test-placeholder-key-minimum-32-characters"
+          JwtSettings__Issuer: "BMS.WebAPI"
+          JwtSettings__Audience: "BMS.Client"
+          ConnectionStrings__DefaultConnection: "Host=localhost;Port=5432;Database=bms_integration_tests;Username=postgres;Password=postgres"
+          Redis__ConnectionString: "localhost:6379"
+        run: dotnet test BMS.IntegrationTests/BMS.IntegrationTests.csproj --no-build --configuration Release --logger "trx;LogFileName=integration-results.trx"
+
+      - name: Upload Integration Test Results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-test-results
+          path: '**/*.trx'
+          retention-days: 14
+
+  # ---------------------------------------------------------------------------
+  # Phase 2.5 — API Contract Diff (Breaking-Change Quality Gate)
+  #
+  # PURPOSE
+  #   Protects the Register (WinForms) and Face (Next.js) layers from unexpected
+  #   backend regressions. Any change that removes an endpoint, renames a field,
+  #   or alters a response schema is classified as a "breaking change" and blocks
+  #   the PR merge.
+  #
+  # HOW IT WORKS
+  #   1. Downloads the freshly-generated openapi-spec.json artifact produced by
+  #      the ci-openapi-contract job in this same run.
+  #   2. Compares it against the committed baseline at docs/api/openapi-spec-baseline.json
+  #      using oasdiff (https://github.com/tufin/oasdiff).
+  #   3. oasdiff --fail-on-diff exits non-zero ONLY on breaking changes (removals,
+  #      incompatible type changes). New endpoints and new optional parameters
+  #      are additions and do NOT fail the build.
+  #
+  # UPDATING THE BASELINE (intentional API evolution)
+  #   When you intentionally change the API contract (e.g., a new version, planned
+  #   removal), update docs/api/openapi-spec-baseline.json as part of your PR:
+  #     1. Download the openapi-spec artifact from the ci-openapi-contract job.
+  #     2. Replace docs/api/openapi-spec-baseline.json with the new spec.
+  #     3. Commit the update in your PR — the diff job will then pass cleanly.
+  # ---------------------------------------------------------------------------
+  ci-contract-diff:
+    name: API Contract Breaking-Change Gate
+    runs-on: ubuntu-latest
+    needs: ci-openapi-contract
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Download Generated OpenAPI Spec
+        uses: actions/download-artifact@v4
+        with:
+          name: openapi-spec
+          path: /tmp/generated-spec
+
+      - name: Install oasdiff CLI
+        run: |
+          OASDIFF_VERSION="1.10.28"
+          curl -L "https://github.com/tufin/oasdiff/releases/download/v${OASDIFF_VERSION}/oasdiff_${OASDIFF_VERSION}_linux_amd64.tar.gz" -o /tmp/oasdiff.tar.gz
+          tar -xzf /tmp/oasdiff.tar.gz -C /tmp
+          sudo mv /tmp/oasdiff /usr/local/bin/oasdiff
+
+      - name: Run oasdiff Breaking-Change Check
+        run: |
+          oasdiff breaking \
+            docs/api/openapi-spec-baseline.json \
+            /tmp/generated-spec/openapi-spec.json \
+            --fail-on ERR
+
